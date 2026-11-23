@@ -283,11 +283,13 @@
       if (!d) return;
       d.drafts = d.drafts || {}; delete d.drafts[currentType];
       writeDraft(d);
+      idbDelPrefix(currentType + ':');
     }
     function applyDraft(type) {
       const d = loadDraft();
       const vals = (d && d.drafts && d.drafts[type]) || {};
       Object.keys(vals).forEach(id => { const el = document.getElementById(id); if (el) el.value = vals[id]; });
+      restoreFiles(type);                               // screenshots / images bhi wapas
     }
     function restoreDraft() {
       const d = loadDraft();
@@ -482,6 +484,52 @@
     }
     document.querySelectorAll('#view-form input[type=file]').forEach(inp => inp.addEventListener('change', () => queueUpload(inp.id)));
     document.querySelector('#view-form form').addEventListener('reset', () => { Object.keys(uploadCache).forEach(k => delete uploadCache[k]); });
+
+    // ===== Images / Screenshot draft: refresh par bhi bani rahe (IndexedDB), Allotment aur Submission alag-alag =====
+    function idbOpen() {
+      return new Promise((res, rej) => {
+        const r = indexedDB.open('whizz_draft_files', 1);
+        r.onupgradeneeded = () => r.result.createObjectStore('files');
+        r.onsuccess = () => res(r.result);
+        r.onerror = () => rej(r.error);
+      });
+    }
+    async function idbRun(mode, fn) {
+      try {
+        const db = await idbOpen();
+        return await new Promise((res, rej) => {
+          const tx = db.transaction('files', mode), st = tx.objectStore('files');
+          const out = fn(st);
+          tx.oncomplete = () => { db.close(); res(out && out.result !== undefined ? out.result : undefined); };
+          tx.onerror = tx.onabort = () => { db.close(); rej(tx.error); };
+        });
+      } catch (e) { return undefined; }
+    }
+    const idbSet = (k, v) => idbRun('readwrite', st => st.put(v, k));
+    const idbGet = k => idbRun('readonly', st => st.get(k));
+    const idbDel = k => idbRun('readwrite', st => st.delete(k));
+    const idbDelPrefix = p => idbRun('readwrite', st => st.delete(IDBKeyRange.bound(p, p + '\uffff')));
+
+    function saveFileDraft(inp) {
+      const f = inp.files[0], key = currentType + ':' + inp.id;
+      if (f) idbSet(key, { blob: f, name: f.name, mime: f.type, lm: f.lastModified });
+      else idbDel(key);
+      saveDraft();
+    }
+    async function restoreFiles(type) {
+      await new Promise(r => setTimeout(r, 60)); // reset ke baad file-name label settle hone do
+      for (const inp of document.querySelectorAll('#view-form input[type=file]')) {
+        const rec = await idbGet(type + ':' + inp.id);
+        if (!rec || currentType !== type || inp.files.length) continue;
+        try {
+          const f = new File([rec.blob], rec.name || 'image.jpg', { type: rec.mime || 'image/jpeg', lastModified: rec.lm || Date.now() });
+          const dt = new DataTransfer(); dt.items.add(f); inp.files = dt.files;
+          const n = inp.nextElementSibling && inp.nextElementSibling.querySelector('.fname');
+          if (n) n.textContent = f.name;
+        } catch (e) {}
+      }
+    }
+    document.querySelectorAll('#view-form input[type=file]').forEach(inp => inp.addEventListener('change', () => saveFileDraft(inp)));
 
     // Image ko chota karke Base64 me convert karna taaki data drop na ho
     function fileToBase64(file) {
